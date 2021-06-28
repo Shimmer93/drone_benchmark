@@ -334,10 +334,10 @@ valid_dataset = Crop_Dataset(path=path,
 class TrainGlobalConfig:
     num_workers = 4
     batch_size = 8
-    n_epochs = 30 
+    n_epochs = 20 
     lr = 0.0002
 
-    folder = 'CSRNet'
+    folder = 'CSRNet_10epoch'
     downsample = 1
 
     # -------------------
@@ -351,11 +351,11 @@ class TrainGlobalConfig:
 
     SchedulerClass = torch.optim.lr_scheduler.OneCycleLR
     scheduler_params = dict(
-        max_lr=1e-3,
+        max_lr=1e-4,
         #total_steps = len(train_dataset) // 4 * n_epochs, # gradient accumulation
         epochs=n_epochs,
         steps_per_epoch=int(len(train_dataset) / batch_size),
-        pct_start=0.3,
+        pct_start=0.2,
         anneal_strategy='cos', 
         final_div_factor=10**5
     )
@@ -555,10 +555,10 @@ class Fitter:
                 images = images.to(self.device).float()
                 density_maps = density_maps.to(self.device).float()
                 
-
-                preds = self.model(images)
-                loss = self.criterion(preds,density_maps)
-                metric_loss = self.metric(preds,density_maps,self.config.downsample)
+                with torch.cuda.amp.autocast(): #native fp16
+                    preds = self.model(images)
+                    loss = self.criterion(preds,density_maps)
+                    metric_loss = self.metric(preds,density_maps,self.config.downsample)
                 mae_loss.update(metric_loss.detach().item(),batch_size)
                 summary_loss.update(loss.detach().item(), batch_size)
 
@@ -668,8 +668,8 @@ def run_training():
 
     val_loader = torch.utils.data.DataLoader(
         valid_dataset, 
-        batch_size=TrainGlobalConfig.batch_size//2,
-        num_workers=TrainGlobalConfig.num_workers,
+        batch_size=TrainGlobalConfig.batch_size//4,
+        num_workers=TrainGlobalConfig.num_workers//2,
         shuffle=False,
         sampler=SequentialSampler(valid_dataset),
         pin_memory=True,
