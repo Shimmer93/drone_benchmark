@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import os
 from datetime import datetime
 import time
@@ -35,11 +36,13 @@ def seed_everything(seed):
 
 seed_everything(SEED)
 
-path = '/home/heye0507/drone/drone_benchmark/data/benchmark'
+path = '/mnt/home/hheat/USERDIR/counting-bench/data'
 train_images = path + '/images'
-test_images = path + '/test_images'
+test_images = path + '/test_images/images'
 anno = path + '/annotation'
 density_maps = path + '/dmaps'
+
+LOG_PARA = 1000
 
 def get_train_transforms():
     return A.Compose(
@@ -254,7 +257,8 @@ class Counting_Dataset(Dataset):
         return fn, points
     
     
-    
+# ADD LOG_PARA to density map
+
 class Crop_Dataset(Counting_Dataset):
     def __init__(self,path,image_fnames,dmap_folder,gt_folder=None,transforms=None,mosaic=False,downsample=4,crop_size=512,method='train'):
         super().__init__(path,image_fnames,dmap_folder,gt_folder,transforms,mosaic,downsample)
@@ -284,6 +288,7 @@ class Crop_Dataset(Counting_Dataset):
             
         else:
             density_map = cv2.resize(density_map,(w//self.downsample,h//self.downsample))#,interpolation=cv2.INTER_NEAREST)
+            density_map = density_map[1:-1,:]
         
         if self.transforms:
             for tfms in self.transforms:
@@ -294,7 +299,7 @@ class Crop_Dataset(Counting_Dataset):
                 })
                 #image, density_map, gt_points = aug['image'], aug['mask'], aug['keypoints']
                 image, density_map = aug['image'], aug['mask'] # issue with previous keypoints (albumentation?)
-        return image, density_map, fn, gt_points
+        return image, density_map*LOG_PARA, fn, gt_points
     
     def _random_crop(self, im_h, im_w, crop_h, crop_w):
         res_h = im_h - crop_h
@@ -309,18 +314,19 @@ train_fp = glob(train_images + '/*.jpg')
 test_fp = glob(test_images + '/*.jpg')
 
 
-split = int(len(train_fp) * 0.8)
+#split = int(len(train_fp) * 0.8)
 
 
 train_dataset = Crop_Dataset(path=path,
-                                 image_fnames=train_fp[:split],dmap_folder='/dmaps',
-                                 gt_folder='/annotation/all',
-                                 transforms=[get_train_transforms(),get_train_image_only_transforms()],
+                             image_fnames=train_fp,dmap_folder='/dmaps',
+                             gt_folder='/annotation',
+                             transforms=[get_train_transforms(),get_train_image_only_transforms()],
+                             crop_size=1024
                                 )
 
 valid_dataset = Crop_Dataset(path=path,
                                  image_fnames=test_fp,dmap_folder='/dmaps',
-                                 gt_folder='/annotation/all',
+                                 gt_folder='/annotation',
                                  transforms=[get_valid_trainsforms()],
                                  method='valid'
                                 )
@@ -329,12 +335,12 @@ valid_dataset = Crop_Dataset(path=path,
 
 
 class TrainGlobalConfig:
-    num_workers = 4
-    batch_size = 8
-    n_epochs = 30 
+    num_workers = 48
+    batch_size = 32
+    n_epochs = 120 
     lr = 0.0002
 
-    folder = 'mcnn_crop_baseline'
+    folder = 'mcnn_crop_7_16'
     downsample = 4
 
     # -------------------
@@ -451,7 +457,7 @@ def MSELoss_MCNN(preds,targs):
     return nn.MSELoss()(preds,targs)
 
 def MAELoss_MCNN(preds,targs,upsample):
-    return nn.L1Loss()(preds.sum(dim=[-1,-2])*upsample*upsample, targs.sum(dim=[-1,-2])*upsample*upsample)
+    return nn.L1Loss()((preds/LOG_PARA).sum(dim=[-1,-2])*upsample*upsample, (targs/LOG_PARA).sum(dim=[-1,-2])*upsample*upsample)
 
 
 
@@ -485,7 +491,7 @@ class Fitter:
         self.config = config
         self.epoch = 0
 
-        self.base_dir = f'/home/heye0507/drone/drone_benchmark/model/{config.folder}'
+        self.base_dir = f'/mnt/home/hheat/USERDIR/counting-bench/model/{config.folder}'
         if not os.path.exists(self.base_dir):
             os.makedirs(self.base_dir)
         
@@ -493,6 +499,10 @@ class Fitter:
         self.best_summary_loss = 10**5
 
         self.model = model
+        if torch.cuda.device_count() > 1:
+            print("Let's use", torch.cuda.device_count(), "GPUs!")
+          # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
+            self.model = nn.DataParallel(self.model)
         self.device = device
 
         param_optimizer = list(self.model.named_parameters())
@@ -561,13 +571,17 @@ class Fitter:
                     )
             with torch.no_grad():
                 batch_size = images.shape[0]
-                images = images.to(self.device).float()
-                density_maps = density_maps.to(self.device).float()
+                #images = images.to(self.device).float()
+                images = images.cuda().float()
+                #density_maps = density_maps.to(self.device).float()
+                density_maps = density_maps.cuda().float()
+                density_maps = F.pad(density_maps,(0,0,1,1))
                 
 
-                preds = self.model(images)
-                loss = self.criterion(preds,density_maps)
-                metric_loss = self.metric(preds,density_maps,self.config.downsample)
+                with torch.cuda.amp.autocast(): #native fp16
+                    preds = self.model(images)
+                    loss = self.criterion(preds,density_maps)
+                    metric_loss = self.metric(preds,density_maps,self.config.downsample)
                 mae_loss.update(metric_loss.detach().item(),batch_size)
                 summary_loss.update(loss.detach().item(), batch_size)
 
@@ -588,9 +602,11 @@ class Fitter:
                         f'time: {(time.time() - t):.5f}', end='\r'
                     )
             
-            images = images.to(self.device).float()
+            #images = images.to(self.device).float()
+            images = images.cuda().float()
             batch_size = images.shape[0]
-            density_maps = density_maps.to(self.device).float()
+            #density_maps = density_maps.to(self.device).float()
+            density_maps = density_maps.cuda().float()
             
             
             self.optimizer.zero_grad()
@@ -677,7 +693,7 @@ def run_training():
 
     val_loader = torch.utils.data.DataLoader(
         valid_dataset, 
-        batch_size=TrainGlobalConfig.batch_size,
+        batch_size=TrainGlobalConfig.batch_size//2,
         num_workers=TrainGlobalConfig.num_workers,
         shuffle=False,
         sampler=SequentialSampler(valid_dataset),

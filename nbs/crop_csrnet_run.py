@@ -36,9 +36,9 @@ def seed_everything(seed):
 seed_everything(SEED)
 
 
-path = '/home/heye0507/drone/drone_benchmark/data/benchmark'
+path = '/mnt/home/hheat/USERDIR/counting-bench/data'
 train_images = path + '/images'
-test_images = path + '/test_images'
+test_images = path + '/test_images/images'
 anno = path + '/annotation'
 density_maps = path + '/dmaps'
 
@@ -83,13 +83,7 @@ def get_valid_trainsforms():
         ]
     )
 
-# def get_valid_image_only_transforms():
-#     return A.Compose(
-#         [
-#             A.Resize(360,640),
-#         ],
-#         additional_targets={'image': 'image'}
-#     )
+
 
 mean = torch.tensor([0.4939, 0.4794, 0.4583])
 std = torch.tensor([0.2177, 0.2134, 0.2144])
@@ -312,19 +306,19 @@ class Crop_Dataset(Counting_Dataset):
 train_fp = glob(train_images + '/*.jpg')
 test_fp = glob(test_images + '/*.jpg')
 
-split = int(len(train_fp) * 0.8)
+#split = int(len(train_fp) * 0.8)
 
 
 train_dataset = Crop_Dataset(path=path,
-                             image_fnames=train_fp[:split],dmap_folder='/dmaps',
-                             gt_folder='/annotation/all',
+                             image_fnames=train_fp,dmap_folder='/dmaps',
+                             gt_folder='/annotation',
                              transforms=[get_train_transforms(),get_train_image_only_transforms()],
-                             downsample=1,
+                             downsample=1,crop_size=1024
                                 )
 
 valid_dataset = Crop_Dataset(path=path,
                              image_fnames=test_fp,dmap_folder='/dmaps',
-                             gt_folder='/annotation/all',
+                             gt_folder='/annotation',
                              transforms=[get_valid_trainsforms()],
                              method='valid',
                              downsample=1
@@ -332,12 +326,12 @@ valid_dataset = Crop_Dataset(path=path,
 
 
 class TrainGlobalConfig:
-    num_workers = 4
-    batch_size = 8
-    n_epochs = 20 
+    num_workers = 24
+    batch_size = 24
+    n_epochs = 60 
     lr = 0.0002
 
-    folder = 'CSRNet_10epoch'
+    folder = 'CSRNet_7_17_1024'
     downsample = 1
 
     # -------------------
@@ -398,7 +392,8 @@ class CSRNet(nn.Module):
                 temp_key = list(self.frontend.state_dict().items())[i][0]
                 fsd[temp_key] = list(mod.state_dict().items())[i][1]
             self.frontend.load_state_dict(fsd)
-
+            
+    @torch.cuda.amp.autocast()
     def forward(self, x):
         x = self.frontend(x)
         x = self.backend(x)
@@ -476,7 +471,7 @@ class Fitter:
         self.config = config
         self.epoch = 0
 
-        self.base_dir = f'/home/heye0507/drone/drone_benchmark/model/{config.folder}'
+        self.base_dir = f'/mnt/home/hheat/USERDIR/counting-bench/model/{config.folder}'
         if not os.path.exists(self.base_dir):
             os.makedirs(self.base_dir)
         
@@ -484,6 +479,10 @@ class Fitter:
         self.best_summary_loss = 10**5
 
         self.model = model
+        if torch.cuda.device_count() > 1:
+            print("Let's use", torch.cuda.device_count(), "GPUs!")
+          # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
+            self.model = nn.DataParallel(self.model)
         self.device = device
 
         param_optimizer = list(self.model.named_parameters())
@@ -552,8 +551,10 @@ class Fitter:
                     )
             with torch.no_grad():
                 batch_size = images.shape[0]
-                images = images.to(self.device).float()
-                density_maps = density_maps.to(self.device).float()
+                #images = images.to(self.device).float()
+                images = images.cuda().float()
+                #density_maps = density_maps.to(self.device).float()
+                density_maps = density_maps.cuda().float()
                 
                 with torch.cuda.amp.autocast(): #native fp16
                     preds = self.model(images)
@@ -579,9 +580,11 @@ class Fitter:
                         f'time: {(time.time() - t):.5f}', end='\r'
                     )
             
-            images = images.to(self.device).float()
+            #images = images.to(self.device).float()
+            images = images.cuda().float()
             batch_size = images.shape[0]
-            density_maps = density_maps.to(self.device).float()
+            #density_maps = density_maps.to(self.device).float()
+            density_maps = density_maps.cuda().float()
             
             
             self.optimizer.zero_grad()
@@ -668,8 +671,8 @@ def run_training():
 
     val_loader = torch.utils.data.DataLoader(
         valid_dataset, 
-        batch_size=TrainGlobalConfig.batch_size//4,
-        num_workers=TrainGlobalConfig.num_workers//2,
+        batch_size=TrainGlobalConfig.batch_size//2,
+        num_workers=TrainGlobalConfig.num_workers,
         shuffle=False,
         sampler=SequentialSampler(valid_dataset),
         pin_memory=True,

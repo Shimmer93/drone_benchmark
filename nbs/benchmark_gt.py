@@ -42,11 +42,14 @@ def seed_everything(seed):
 seed_everything(SEED)
 
 
-path = '/home/heye0507/drone/drone_benchmark/data/benchmark'
+path = '/mnt/home/hheat/USERDIR/counting-bench/data'
 train_images = path + '/images'
-test_images = path + '/test_images'
+test_images = path + '/test_images/images'
 anno = path + '/annotation'
 density_maps = path + '/dmaps'
+sm_train_images = path + '/sz_392_train_images'
+sm_test_images = path + '/sz_392_test_images'
+sm_dmaps = path + '/sz_392_dmaps'
 
 
 def gaussian_filter_density(img_shape,points):
@@ -90,10 +93,10 @@ def gaussian_filter_density(img_shape,points):
 
 def expand_path(p):
     fn = p.split('/')[-1].split('.')[0]
-    if isfile(train_images + '/' + fn + '.jpg'): 
-        return train_images + '/' + fn + '.jpg'
-    elif isfile(test_images + '/' + fn + '.jpg'):
-        return test_images + '/' + fn + '.jpg'
+    if isfile(sm_train_images + '/sm_' + fn + '.jpg'): 
+        return sm_train_images + '/sm_' + fn + '.jpg'
+    elif isfile(sm_test_images + '/sm_' + fn + '.jpg'):
+        return sm_test_images + '/sm_' + fn + '.jpg'
     return p
 
 def open_image(p):
@@ -106,18 +109,22 @@ def get_density_map(p,test=False):
     image_file_p = expand_path(p)
     if image_file_p != p:
         dmap_p = image_file_p.split('/')[-1].split('.')[0]
-        dmap_p = density_maps + '/' + dmap_p + '.npy'
+        dmap_p = sm_dmaps + '/' + dmap_p + '.npy'
         if isfile(dmap_p):
             return
         mat = io.loadmat(p)
         points = mat['annotation'].astype(int)
+        ############## RESCALE ################
+        points[:,0] = points[:,0] / 2720 * 680
+        points[:,1] = points[:,1] / 1530 * 392
+        #######################################
         image_shape = cv2.imread(image_file_p).shape[:2]
         if test: 
             density_map = None
         else:
             density_map = gaussian_filter_density(image_shape,points)
-            #dmap_p = image_file_p.split('/')[-1].split('.')[0]
-            #dmap_p = density_maps + '/' + dmap_p + '.npy'
+            dmap_p = image_file_p.split('/')[-1].split('.')[0]
+            dmap_p = sm_dmaps + '/' + dmap_p + '.npy'
             np.save(dmap_p,density_map)
     else:
         density_map = None
@@ -126,9 +133,7 @@ def get_density_map(p,test=False):
     
 fns = []
 fns.append(Parallel(n_jobs=psutil.cpu_count(),verbose=10)(
-    (delayed(get_density_map)(fp) for fp in glob(anno+'/*/*.mat'))
+    (delayed(get_density_map)(fp) for fp in glob(anno+'/*.mat'))
 ))
 
-with open(path+'/missing.txt','w') as f:
-    for fn in fns:
-        f.write(fn + '\n')
+print(fns)
